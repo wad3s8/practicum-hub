@@ -342,3 +342,43 @@ def test_student_has_no_account_and_password_validation(client, admin, graph):
         ).status_code
         == 422
     )
+
+
+def test_project_form_and_filters(client, graph, admin):
+    h, uid = graph["headers"], graph["account"]["id"]
+    path = f"{PREFIX}/projects"
+    payload = {"title": "Voice bot", "description": "Call center", "curator_ids": [uid]}
+    created = client.post(path, headers=admin, json=payload)
+    assert created.status_code == 201
+    project = created.json()
+    assert project["curator_ids"] == [uid]
+    params = {"q": "center", "mine_only": True, "curator_id": uid}
+    assert client.get(path, headers=h, params=params).json() == [project]
+    assert client.get(path, headers=admin, params=params).json() == []
+    item = f"{path}/{project['id']}"
+    assert client.patch(item, headers=h, json={"curator_ids": [uid, uid]}).status_code == 422
+    assert client.patch(item, headers=h, json={"title": None, "curator_ids": []}).status_code == 422
+    assert client.get(item, headers=h).json() == project
+    assert client.patch(item, headers=h, json={"curator_ids": []}).json()["curator_ids"] == []
+    assert client.get(path, headers=h, params=params).json() == []
+    assert client.get(f"{PREFIX}/students", headers=h, params={"q": "ri-101"}).json() == [graph["student"]]
+
+
+def test_team_meeting_schedule(client, graph):
+    h = graph["headers"]
+    path = f"{PREFIX}/teams/{graph['team']['id']}/meetings"
+    assert client.get(path).status_code == 401
+    assert client.get(path + "/next", headers=h).json() is None
+    def schedule(starts_at):
+        return client.post(path, headers=h, json={"title": "Review", "starts_at": starts_at})
+    assert schedule("2099-01-01T12:00:00").status_code == 422
+    past = schedule("2001-01-01T00:00:00Z").json()
+    late = schedule("2099-01-01T11:30:00Z").json()
+    early = schedule("2099-01-01T12:00:00+05:00").json()
+    assert client.get(path + "/next", headers=h).json() == early
+    assert client.get(path, headers=h).json() == [past, early, late]
+    item = f"{PREFIX}/meetings/{early['id']}"
+    assert client.patch(item, headers=h, json={"starts_at": "2099-02-01T00:00:00Z"}).status_code == 200
+    assert client.get(path + "/next", headers=h).json() == late
+    assert client.delete(item, headers=h).status_code == 204
+    assert client.get(item, headers=h).status_code == 404

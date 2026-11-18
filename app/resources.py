@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 
 from app import models as m
 from app import schemas as s
+from app.ktalk import create_room
 from app.security import CurrentAccount, Db, current_account
 from app.services import delete_unreferenced, get_or_404, list_records, merged_values, save, update
 
@@ -77,7 +78,8 @@ def students(
 ):
     filters = []
     if q:
-        filters.append(m.Student.full_name.icontains(q, autoescape=True))
+        filters.append(m.Student.full_name.icontains(q, autoescape=True)
+                       | m.Student.study_group.icontains(q, autoescape=True))
     if university_id is not None:
         filters.append(m.Student.university_id == university_id)
     if team_id is not None:
@@ -147,6 +149,59 @@ def delete_team(team_id: int, db: Db):
     return Response(status_code=204)
 
 
+def team_meetings_query(team_id: int):
+    return select(m.Meeting).where(m.Meeting.team_id == team_id).order_by(
+        m.Meeting.starts_at, m.Meeting.id
+    )
+
+
+@router.post("/teams/{team_id}/meetings", response_model=s.MeetingRead, status_code=201, tags=["Meetings"])
+def create_meeting(team_id: int, payload: s.MeetingCreate, db: Db):
+    get_or_404(db, m.Team, team_id)
+    return save(db, m.Meeting(team_id=team_id, **payload.model_dump()))
+
+
+@router.get("/teams/{team_id}/meetings", response_model=list[s.MeetingRead], tags=["Meetings"])
+def team_meetings(team_id: int, db: Db, offset: Offset = 0, limit: Limit = 50):
+    get_or_404(db, m.Team, team_id)
+    return db.scalars(team_meetings_query(team_id).offset(offset).limit(limit)).all()
+
+
+@router.get("/teams/{team_id}/meetings/next", response_model=s.MeetingRead | None, tags=["Meetings"])
+def next_meeting(team_id: int, db: Db):
+    get_or_404(db, m.Team, team_id)
+    return db.scalar(team_meetings_query(team_id).where(m.Meeting.starts_at >= func.now()).limit(1))
+
+
+@router.get("/meetings/{meeting_id}", response_model=s.MeetingRead, tags=["Meetings"])
+def meeting(meeting_id: int, db: Db):
+    return get_or_404(db, m.Meeting, meeting_id)
+
+
+@router.patch("/meetings/{meeting_id}", response_model=s.MeetingRead, tags=["Meetings"])
+def edit_meeting(meeting_id: int, payload: s.MeetingUpdate, db: Db):
+    return update(db, get_or_404(db, m.Meeting, meeting_id), payload, s.MeetingCreate)
+
+
+@router.put("/meetings/{meeting_id}/ktalk-room", response_model=s.MeetingRead, tags=["Meetings"])
+def attach_ktalk_room(meeting_id: int, db: Db):
+    if not 0 < meeting_id <= 9223372036854775807:
+        raise HTTPException(404, "Meeting not found")
+    item = db.get(m.Meeting, meeting_id, with_for_update=True)
+    if item is None:
+        raise HTTPException(404, "Meeting not found")
+    if item.ktalk_url:
+        return item
+    item.ktalk_url = create_room(item.ktalk_room_key, item.title)
+    return save(db, item)
+
+
+@router.delete("/meetings/{meeting_id}", status_code=204, tags=["Meetings"])
+def delete_meeting(meeting_id: int, db: Db):
+    delete_unreferenced(db, get_or_404(db, m.Meeting, meeting_id))
+    return Response(status_code=204)
+
+
 @router.post(
     "/teams/{team_id}/members", response_model=s.MemberRead, status_code=201, tags=["Team members"]
 )
@@ -175,14 +230,29 @@ def edit_member(team_id: int, member_id: int, payload: s.MemberUpdate, db: Db):
     return update(db, item, payload, s.MemberCreate)
 
 
+def selected_curators(db, ids):
+    if ids is None or len(set(ids)) != len(ids):
+        raise HTTPException(422, "Expected a list of distinct curator IDs")
+    accounts = db.scalars(select(m.Account).where(
+        m.Account.id.in_(ids), m.Account.system_role == "curator", m.Account.is_active
+    )).all()
+    if len(accounts) != len(ids):
+        raise HTTPException(422, "All selected accounts must be active curators")
+    return accounts
+
+
 @router.post("/projects", response_model=s.ProjectRead, status_code=201, tags=["Projects"])
 def create_project(payload: s.ProjectCreate, db: Db, account: CurrentAccount):
-    return save(db, m.Project(created_by=account.id, **payload.model_dump()))
+    return save(db, m.Project(created_by=account.id, curators=selected_curators(db, payload.curator_ids),
+                              **payload.model_dump(exclude={"curator_ids"})))
 
 
 @router.get("/projects", response_model=list[s.ProjectRead], tags=["Projects"])
 def projects(
     db: Db,
+    account: CurrentAccount,
+    curator_id: s.PositiveId | None = None,
+    mine_only: bool = False,
     status: s.ProjectStatus | None = None,
     q: Annotated[str | None, Query(max_length=200)] = None,
     offset: Offset = 0,
@@ -192,7 +262,12 @@ def projects(
     if status is not None:
         filters.append(m.Project.status == status)
     if q:
-        filters.append(m.Project.title.icontains(q, autoescape=True))
+        filters.append(m.Project.title.icontains(q, autoescape=True)
+                       | m.Project.description.icontains(q, autoescape=True))
+    if curator_id is not None:
+        filters.append(m.Project.curators.any(m.Account.id == curator_id))
+    if mine_only:
+        filters.append(m.Project.curators.any(m.Account.id == account.id))
     return list_records(db, m.Project, offset, limit, *filters)
 
 
@@ -203,7 +278,11 @@ def project(project_id: int, db: Db):
 
 @router.patch("/projects/{project_id}", response_model=s.ProjectRead, tags=["Projects"])
 def edit_project(project_id: int, payload: s.ProjectUpdate, db: Db):
-    return update(db, get_or_404(db, m.Project, project_id), payload, s.ProjectCreate)
+    item = get_or_404(db, m.Project, project_id)
+    fields = payload.model_dump(exclude_unset=True, exclude={"curator_ids"})
+    if "curator_ids" in payload.model_fields_set:
+        item.curators = selected_curators(db, payload.curator_ids)
+    return update(db, item, s.ProjectUpdate(**fields), s.ProjectFields)
 
 
 @router.delete("/projects/{project_id}", status_code=204, tags=["Projects"])

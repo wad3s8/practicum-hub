@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str
+    ktalk_space: str = Field(default="", pattern=r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)?$")
+    ktalk_api_key: SecretStr = SecretStr("")
     jwt_secret: SecretStr = Field(min_length=32)
     access_token_expire_minutes: int = Field(default=60, ge=1, le=1440)
 

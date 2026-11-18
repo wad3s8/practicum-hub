@@ -1,7 +1,15 @@
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
@@ -107,14 +115,22 @@ class MemberRead(MemberCreate):
     team_id: int
 
 
-class ProjectCreate(Schema):
+class ProjectFields(Schema):
     title: Name
     description: LongText = ""
     expected_result: LongText = ""
     status: ProjectStatus = "active"
 
 
+CuratorIds = Annotated[list[Annotated[int, Field(gt=0, le=9223372036854775807)]], Field(max_length=100)]
+
+
+class ProjectCreate(ProjectFields):
+    curator_ids: CuratorIds = Field(default_factory=list)
+
+
 class ProjectUpdate(Schema):
+    curator_ids: CuratorIds | None = None
     title: Name | None = None
     description: LongText | None = None
     expected_result: LongText | None = None
@@ -124,6 +140,22 @@ class ProjectUpdate(Schema):
 class ProjectRead(ProjectCreate):
     id: int
     created_by: int
+
+
+class MeetingCreate(Schema):
+    title: Name
+    starts_at: AwareDatetime
+
+
+class MeetingUpdate(Schema):
+    title: Name | None = None
+    starts_at: AwareDatetime | None = None
+
+
+class MeetingRead(MeetingCreate):
+    ktalk_url: str | None
+    id: int
+    team_id: int
 
 
 class ProjectTeamCreate(Schema):

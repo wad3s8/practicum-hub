@@ -1,10 +1,12 @@
-from datetime import date
+from datetime import date, datetime
+from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
     Date,
+    DateTime,
     ForeignKey,
     Identity,
     Index,
@@ -13,7 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
@@ -93,6 +95,32 @@ class Project(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     expected_result: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="active")
+    curators: Mapped[list[Account]] = relationship(
+        secondary="project_curator", lazy="selectin", order_by=Account.id
+    )
+
+    @property
+    def curator_ids(self) -> list[int]:
+        return [account.id for account in self.curators]
+
+
+class ProjectCurator(Base):
+    __tablename__ = "project_curator"
+
+    project_id: Mapped[int] = mapped_column(ForeignKey("project.id"), primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("account.id"), primary_key=True, index=True)
+
+
+class Meeting(Base):
+    __tablename__ = "meeting"
+    __table_args__ = (Index("ix_meeting_team_start", "team_id", "starts_at", "id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("team.id", ondelete="RESTRICT"))
+    title: Mapped[str] = mapped_column(String(200))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ktalk_room_key: Mapped[UUID] = mapped_column(server_default=text("gen_random_uuid()"), unique=True)
+    ktalk_url: Mapped[str | None] = mapped_column(String(255))
 
 
 class ProjectTeam(Base):
